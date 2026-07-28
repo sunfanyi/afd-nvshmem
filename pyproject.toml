@@ -1,5 +1,6 @@
 [build-system]
 requires = [
+  "patchelf",
   "scikit-build-core>=0.10",
   "torch>=2.11",
   "wheel",

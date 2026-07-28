@@ -34,17 +34,63 @@ endif()
 
 set(NVSHMEM_INCLUDE_DIR "${NVSHMEM_HOME}/include")
 set(NVSHMEM_DEVICE_LIBRARY "${NVSHMEM_HOME}/lib/libnvshmem_device.a")
-set(NVSHMEM_HOST_LIBRARY "${NVSHMEM_HOME}/lib/libnvshmem_host.so.3")
+set(NVSHMEM_HOST_LIBRARY_SOURCE "${NVSHMEM_HOME}/lib/libnvshmem_host.so.3")
+set(NVSHMEM_BOOTSTRAP_UID_SOURCE "${NVSHMEM_HOME}/lib/nvshmem_bootstrap_uid.so.3")
+if(NOT EXISTS "${NVSHMEM_BOOTSTRAP_UID_SOURCE}")
+    set(NVSHMEM_BOOTSTRAP_UID_SOURCE "${NVSHMEM_HOME}/lib/nvshmem_bootstrap_uid.so")
+endif()
 
 foreach(REQUIRED_PATH
         "${NVSHMEM_INCLUDE_DIR}/nvshmem.h"
         "${NVSHMEM_INCLUDE_DIR}/nvshmemx.h"
         "${NVSHMEM_DEVICE_LIBRARY}"
-        "${NVSHMEM_HOST_LIBRARY}")
+        "${NVSHMEM_HOST_LIBRARY_SOURCE}"
+        "${NVSHMEM_BOOTSTRAP_UID_SOURCE}")
     if(NOT EXISTS "${REQUIRED_PATH}")
         message(FATAL_ERROR "Required NVSHMEM file not found: ${REQUIRED_PATH}")
     endif()
 endforeach()
+
+# The stock libnvshmem_host.so.3 holds process-global singleton state: two
+# users in one process (this extension for the A<->F world, DeepEP
+# low-latency for the F-only EP world) would merge into a single incompatible
+# world and deadlock. Ship renamed private copies of the host runtime and of
+# the UID bootstrap plugin it dlopens, so this extension gets a fully
+# isolated NVSHMEM instance. See https://github.com/NVIDIA/nvshmem/issues/68.
+find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
+
+set(AFD_NVSHMEM_HOST_SONAME "libafd_nvshmem_host.so.3")
+set(AFD_NVSHMEM_HOST_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/${AFD_NVSHMEM_HOST_SONAME}")
+set(AFD_NVSHMEM_BOOTSTRAP_UID_SONAME "afd_nvshmem_bootstrap_uid.so.3")
+set(AFD_NVSHMEM_BOOTSTRAP_UID_PLUGIN
+    "${CMAKE_CURRENT_BINARY_DIR}/${AFD_NVSHMEM_BOOTSTRAP_UID_SONAME}")
+
+function(afd_nvshmem_private_copy SOURCE DESTINATION SONAME)
+    execute_process(
+        COMMAND cp -L "${SOURCE}" "${DESTINATION}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(
+        COMMAND chmod u+w "${DESTINATION}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(
+        COMMAND "${PATCHELF_EXECUTABLE}" --set-soname "${SONAME}" "${DESTINATION}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    # Rebind a possible dependency on the stock host runtime to the private
+    # copy (no-op when the DT_NEEDED entry is absent).
+    execute_process(
+        COMMAND "${PATCHELF_EXECUTABLE}" --replace-needed
+                libnvshmem_host.so.3 "${AFD_NVSHMEM_HOST_SONAME}" "${DESTINATION}"
+        COMMAND_ERROR_IS_FATAL ANY)
+endfunction()
+
+afd_nvshmem_private_copy(
+    "${NVSHMEM_HOST_LIBRARY_SOURCE}"
+    "${AFD_NVSHMEM_HOST_LIBRARY}"
+    "${AFD_NVSHMEM_HOST_SONAME}")
+afd_nvshmem_private_copy(
+    "${NVSHMEM_BOOTSTRAP_UID_SOURCE}"
+    "${AFD_NVSHMEM_BOOTSTRAP_UID_PLUGIN}"
+    "${AFD_NVSHMEM_BOOTSTRAP_UID_SONAME}")
 
 Python_add_library(
     _C
@@ -64,7 +110,8 @@ target_link_libraries(
     ${TORCH_LIBRARIES}
     CUDA::cudart
     "${NVSHMEM_DEVICE_LIBRARY}"
-    "${NVSHMEM_HOST_LIBRARY}"
+    "${AFD_NVSHMEM_HOST_LIBRARY}"
+    ${CMAKE_DL_LIBS}
 )
 
 set_target_properties(
@@ -76,8 +123,8 @@ set_target_properties(
     CXX_VISIBILITY_PRESET hidden
     CUDA_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
-    BUILD_RPATH "${NVSHMEM_HOME}/lib"
-    INSTALL_RPATH "${NVSHMEM_HOME}/lib"
+    BUILD_RPATH "${CMAKE_CURRENT_BINARY_DIR}"
+    INSTALL_RPATH "$ORIGIN"
 )
 
 # NVSHMEM's static device archive must not export a second set of global
@@ -85,3 +132,30 @@ set_target_properties(
 target_link_options(_C PRIVATE "LINKER:--exclude-libs,ALL")
 
 install(TARGETS _C LIBRARY DESTINATION afd_nvshmem)
+install(
+    FILES "${AFD_NVSHMEM_HOST_LIBRARY}" "${AFD_NVSHMEM_BOOTSTRAP_UID_PLUGIN}"
+    DESTINATION afd_nvshmem)
+
+# The wheel redistributes NVSHMEM binaries; ship their license text with it.
+set(NVSHMEM_LICENSE_FILE "")
+foreach(LICENSE_CANDIDATE
+        "${NVSHMEM_HOME}/License.txt"
+        "${NVSHMEM_HOME}/LICENSE.txt"
+        "${NVSHMEM_HOME}/LICENSE"
+        "${NVSHMEM_HOME}/share/doc/nvshmem/License.txt"
+        "${NVSHMEM_HOME}/share/doc/nvshmem/copyright")
+    if(EXISTS "${LICENSE_CANDIDATE}")
+        set(NVSHMEM_LICENSE_FILE "${LICENSE_CANDIDATE}")
+        break()
+    endif()
+endforeach()
+if(NVSHMEM_LICENSE_FILE)
+    install(
+        FILES "${NVSHMEM_LICENSE_FILE}"
+        DESTINATION afd_nvshmem
+        RENAME "NVSHMEM_LICENSE.txt")
+else()
+    message(WARNING
+        "No NVSHMEM license file found under ${NVSHMEM_HOME}; the wheel "
+        "redistributes NVSHMEM binaries without their license text")
+endif()

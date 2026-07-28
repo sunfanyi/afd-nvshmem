@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "provider.h"
 
 #include <ATen/ATen.h>
@@ -5,11 +9,13 @@
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -130,12 +136,33 @@ __global__ void WaitNextKernel(uint64_t* signal, uint64_t* expected) {
   }
 }
 
+// The extension links a renamed private copy of the NVSHMEM host runtime.
+// If a stock libnvshmem_host.so.3 was injected into the global symbol scope
+// (LD_PRELOAD, RTLD_GLOBAL), the dynamic linker would silently bind our
+// calls to that shared instance, merging two incompatible worlds. Fail fast
+// instead of hanging later.
+void CheckPrivateRuntimeBinding() {
+  Dl_info info{};
+  const int status =
+      dladdr(reinterpret_cast<const void*>(&nvshmem_barrier_all), &info);
+  TORCH_CHECK(
+      status != 0 && info.dli_fname != nullptr,
+      "failed to resolve the NVSHMEM host runtime binding");
+  TORCH_CHECK(
+      std::strstr(info.dli_fname, "libafd_nvshmem_host.so") != nullptr,
+      "NVSHMEM symbols are bound to '",
+      info.dli_fname,
+      "' instead of the private libafd_nvshmem_host.so.3; another NVSHMEM "
+      "runtime preempted the binding (e.g. via LD_PRELOAD or RTLD_GLOBAL)");
+}
+
 }  // namespace
 
 std::vector<int64_t> GetUniqueId() {
   TORCH_CHECK(
       State().lifecycle == ProviderLifecycle::kFresh,
       "unique ID must be generated before provider initialization");
+  CheckPrivateRuntimeBinding();
 
   nvshmemx_uniqueid_t unique_id = NVSHMEMX_UNIQUEID_INITIALIZER;
   const int status = nvshmemx_get_uniqueid(&unique_id);
@@ -167,6 +194,7 @@ std::vector<int64_t> InitProvider(
       unique_id.size(),
       " bytes, expected ",
       sizeof(nvshmemx_uniqueid_t));
+  CheckPrivateRuntimeBinding();
 
   nvshmemx_uniqueid_t native_unique_id = NVSHMEMX_UNIQUEID_INITIALIZER;
   auto* native_bytes = reinterpret_cast<uint8_t*>(&native_unique_id);
