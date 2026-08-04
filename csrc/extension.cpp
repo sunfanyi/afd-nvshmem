@@ -20,7 +20,8 @@ TORCH_LIBRARY(afd_nvshmem, module) {
   module.impl("put_signal_on_stream", &afd_nvshmem::PutSignalOnStream);
 
   module.def(
-      "wait_next_on_stream(Tensor signal, Tensor(a!) expected) -> ()");
+      "wait_next_on_stream(Tensor signal, Tensor(a!) expected, int arrivals) "
+      "-> ()");
   module.impl("wait_next_on_stream", &afd_nvshmem::WaitNextOnStream);
 
   module.def("close_provider() -> ()");

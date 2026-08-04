@@ -61,12 +61,16 @@ provider = Provider.init(uid, rank, world_size, device)
 arena = provider.allocate_arena(num_bytes)
 
 provider.put_signal_on_stream(payload, signal, peer)
-provider.wait_next_on_stream(signal, expected)
+provider.wait_next_on_stream(signal, expected, arrivals=num_peers)
 provider.close()
 ```
 
-All ranks must call collective operations in the same order. Arena tensors and
-views become invalid immediately after `close()`.
+`arrivals` defaults to 1 and must be non-negative. The wait advances
+`expected` by `arrivals` and blocks until the signal reaches that value;
+`arrivals=0` leaves `expected` unchanged and lets a peerless rank preserve the
+collective launch order without waiting. All ranks must call collective
+operations in the same order. Arena tensors and views become invalid
+immediately after `close()`.
 
 Run the smoke test with two visible GPUs:
 

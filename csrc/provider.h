@@ -24,7 +24,8 @@ void PutSignalOnStream(
 
 void WaitNextOnStream(
     const at::Tensor& signal,
-    const at::Tensor& expected);
+    const at::Tensor& expected,
+    int64_t arrivals);
 
 void CloseProvider();
 

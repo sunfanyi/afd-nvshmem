@@ -141,9 +141,10 @@ class Provider:
         self,
         signal: torch.Tensor,
         expected: torch.Tensor,
+        arrivals: int = 1,
     ) -> None:
         self._check_ready()
-        torch.ops.afd_nvshmem.wait_next_on_stream(signal, expected)
+        torch.ops.afd_nvshmem.wait_next_on_stream(signal, expected, arrivals)
 
     def close(self) -> None:
         if self._closed:

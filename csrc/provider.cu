@@ -129,9 +129,12 @@ void CheckSignalTensor(const at::Tensor& tensor, const char* name) {
       " must be 8-byte aligned");
 }
 
-__global__ void WaitNextKernel(uint64_t* signal, uint64_t* expected) {
-  if (threadIdx.x == 0) {
-    const uint64_t target = ++(*expected);
+__global__ void WaitNextKernel(
+    uint64_t* signal,
+    uint64_t* expected,
+    uint64_t arrivals) {
+  if (threadIdx.x == 0 && arrivals != 0) {
+    const uint64_t target = (*expected += arrivals);
     nvshmem_signal_wait_until(signal, NVSHMEM_CMP_GE, target);
   }
 }
@@ -349,9 +352,11 @@ void PutSignalOnStream(
 
 void WaitNextOnStream(
     const at::Tensor& signal,
-    const at::Tensor& expected) {
+    const at::Tensor& expected,
+    int64_t arrivals) {
   CheckSignalTensor(signal, "signal");
   CheckSignalTensor(expected, "expected");
+  TORCH_CHECK(arrivals >= 0, "arrivals must be non-negative");
   const ProviderState& state = State();
   const at::cuda::CUDAGuard device_guard(state.device);
   TORCH_CHECK(
@@ -364,7 +369,8 @@ void WaitNextOnStream(
 
   uint64_t* signal_pointer = signal.data_ptr<uint64_t>();
   uint64_t* expected_pointer = expected.data_ptr<uint64_t>();
-  void* arguments[] = {&signal_pointer, &expected_pointer};
+  uint64_t arrival_count = static_cast<uint64_t>(arrivals);
+  void* arguments[] = {&signal_pointer, &expected_pointer, &arrival_count};
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(state.device).stream();
   const int status = nvshmemx_collective_launch(
