@@ -67,10 +67,14 @@ provider.close()
 
 `arrivals` defaults to 1 and must be non-negative. The wait advances
 `expected` by `arrivals` and blocks until the signal reaches that value;
-`arrivals=0` leaves `expected` unchanged and lets a peerless rank preserve the
-collective launch order without waiting. All ranks must call collective
-operations in the same order. Arena tensors and views become invalid
-immediately after `close()`.
+`arrivals=0` leaves `expected` unchanged and completes immediately, so a
+peerless rank can keep a uniform call sequence. The wait kernel polls the
+local signal with the nonblocking `nvshmem_uint64_test` API and is launched
+per-PE on the current stream, so wait launches carry no cross-PE ordering
+requirement. A successful test also performs NVSHMEM's required consistency
+operation before the payload is consumed. Only init, arena allocation, and
+`close()` are collective and must be called by all PEs in the same order.
+Arena tensors and views become invalid immediately after `close()`.
 
 Run the smoke test with two visible GPUs:
 

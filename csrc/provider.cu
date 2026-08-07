@@ -135,7 +135,8 @@ __global__ void WaitNextKernel(
     uint64_t arrivals) {
   if (threadIdx.x == 0 && arrivals != 0) {
     const uint64_t target = (*expected += arrivals);
-    nvshmem_signal_wait_until(signal, NVSHMEM_CMP_GE, target);
+    while (!nvshmem_uint64_test(signal, NVSHMEM_CMP_GE, target)) {
+    }
   }
 }
 
@@ -369,21 +370,15 @@ void WaitNextOnStream(
 
   uint64_t* signal_pointer = signal.data_ptr<uint64_t>();
   uint64_t* expected_pointer = expected.data_ptr<uint64_t>();
-  uint64_t arrival_count = static_cast<uint64_t>(arrivals);
-  void* arguments[] = {&signal_pointer, &expected_pointer, &arrival_count};
+  const uint64_t arrival_count = static_cast<uint64_t>(arrivals);
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(state.device).stream();
-  const int status = nvshmemx_collective_launch(
-      reinterpret_cast<const void*>(WaitNextKernel),
-      dim3(1),
-      dim3(1),
-      arguments,
-      0,
-      stream);
-  TORCH_CHECK(
-      status == 0,
-      "nvshmemx_collective_launch failed with status ",
-      status);
+  // The nonblocking test API makes this launch per-PE and CUDA-graph
+  // capturable while preserving NVSHMEM's payload visibility semantics.
+  // Using nvshmem_signal_wait_until here would require collective launch.
+  WaitNextKernel<<<dim3(1), dim3(1), 0, stream>>>(
+      signal_pointer, expected_pointer, arrival_count);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void CloseProvider() {
