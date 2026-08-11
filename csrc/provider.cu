@@ -140,6 +140,15 @@ __global__ void WaitNextKernel(
   }
 }
 
+__global__ void WaitSetResetKernel(uint64_t* signal, uint64_t* expected) {
+  if (threadIdx.x == 0) {
+    ++(*expected);
+    while (!nvshmem_uint64_test(signal, NVSHMEM_CMP_EQ, 1)) {
+    }
+    nvshmemx_signal_op(signal, 0, NVSHMEM_SIGNAL_SET, nvshmem_my_pe());
+  }
+}
+
 // The extension links a renamed private copy of the NVSHMEM host runtime.
 // If a stock libnvshmem_host.so.3 was injected into the global symbol scope
 // (LD_PRELOAD, RTLD_GLOBAL), the dynamic linker would silently bind our
@@ -321,7 +330,8 @@ at::Tensor AllocateArena(int64_t num_bytes) {
 void PutSignalOnStream(
     const at::Tensor& payload,
     const at::Tensor& signal,
-    int64_t peer) {
+    int64_t peer,
+    bool use_signal_set) {
   CheckArenaTensor(payload, at::kByte, "payload");
   CheckSignalTensor(signal, "signal");
   const ProviderState& state = State();
@@ -346,7 +356,7 @@ void PutSignalOnStream(
       payload_bytes,
       signal.data_ptr<uint64_t>(),
       1,
-      NVSHMEM_SIGNAL_ADD,
+      use_signal_set ? NVSHMEM_SIGNAL_SET : NVSHMEM_SIGNAL_ADD,
       static_cast<int>(peer),
       stream);
 }
@@ -354,10 +364,14 @@ void PutSignalOnStream(
 void WaitNextOnStream(
     const at::Tensor& signal,
     const at::Tensor& expected,
-    int64_t arrivals) {
+    int64_t arrivals,
+    bool use_signal_set) {
   CheckSignalTensor(signal, "signal");
   CheckSignalTensor(expected, "expected");
   TORCH_CHECK(arrivals >= 0, "arrivals must be non-negative");
+  TORCH_CHECK(
+      !use_signal_set || arrivals == 1,
+      "signal-set waits require exactly one arrival");
   const ProviderState& state = State();
   const at::cuda::CUDAGuard device_guard(state.device);
   TORCH_CHECK(
@@ -373,6 +387,12 @@ void WaitNextOnStream(
   const uint64_t arrival_count = static_cast<uint64_t>(arrivals);
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(state.device).stream();
+  if (use_signal_set) {
+    WaitSetResetKernel<<<dim3(1), dim3(1), 0, stream>>>(
+        signal_pointer, expected_pointer);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
   // The nonblocking test API makes this launch per-PE and CUDA-graph
   // capturable while preserving NVSHMEM's payload visibility semantics.
   // Using nvshmem_signal_wait_until here would require collective launch.

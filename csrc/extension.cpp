@@ -16,12 +16,13 @@ TORCH_LIBRARY(afd_nvshmem, module) {
   module.impl("allocate_arena", &afd_nvshmem::AllocateArena);
 
   module.def(
-      "put_signal_on_stream(Tensor payload, Tensor signal, int peer) -> ()");
+      "put_signal_on_stream(Tensor payload, Tensor signal, int peer, "
+      "bool use_signal_set) -> ()");
   module.impl("put_signal_on_stream", &afd_nvshmem::PutSignalOnStream);
 
   module.def(
-      "wait_next_on_stream(Tensor signal, Tensor(a!) expected, int arrivals) "
-      "-> ()");
+      "wait_next_on_stream(Tensor(a!) signal, Tensor(b!) expected, int arrivals, "
+      "bool use_signal_set) -> ()");
   module.impl("wait_next_on_stream", &afd_nvshmem::WaitNextOnStream);
 
   module.def("close_provider() -> ()");

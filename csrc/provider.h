@@ -20,12 +20,14 @@ at::Tensor AllocateArena(int64_t num_bytes);
 void PutSignalOnStream(
     const at::Tensor& payload,
     const at::Tensor& signal,
-    int64_t peer);
+    int64_t peer,
+    bool use_signal_set);
 
 void WaitNextOnStream(
     const at::Tensor& signal,
     const at::Tensor& expected,
-    int64_t arrivals);
+    int64_t arrivals,
+    bool use_signal_set);
 
 void CloseProvider();
 

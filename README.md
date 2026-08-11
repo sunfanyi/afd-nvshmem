@@ -60,21 +60,24 @@ uid = get_unique_id()  # Generate on one rank and broadcast as opaque bytes.
 provider = Provider.init(uid, rank, world_size, device)
 arena = provider.allocate_arena(num_bytes)
 
-provider.put_signal_on_stream(payload, signal, peer)
-provider.wait_next_on_stream(signal, expected, arrivals=num_peers)
+provider.put_signal_on_stream(
+    payload, signal, peer, use_signal_set=remote_signal_writers == 1
+)
+provider.wait_next_on_stream(
+    signal, expected, arrivals, use_signal_set=arrivals == 1
+)
 provider.close()
 ```
 
-`arrivals` defaults to 1 and must be non-negative. The wait advances
-`expected` by `arrivals` and blocks until the signal reaches that value;
-`arrivals=0` leaves `expected` unchanged and completes immediately, so a
-peerless rank can keep a uniform call sequence. The wait kernel polls the
-local signal with the nonblocking `nvshmem_uint64_test` API and is launched
-per-PE on the current stream, so wait launches carry no cross-PE ordering
-requirement. A successful test also performs NVSHMEM's required consistency
-operation before the payload is consumed. Only init, arena allocation, and
-`close()` are collective and must be called by all PEs in the same order.
-Arena tensors and views become invalid immediately after `close()`.
+The default ADD mode waits for `expected += arrivals`; `arrivals=0` is a
+no-op. SET mode is valid only when the target signal has one writer, the
+receiver uses `arrivals=1`, and the slot cannot be reused before wait resets
+the signal. Both sides must select the same mode. Both modes are stream
+ordered and CUDA Graph reusable.
+
+Waits use per-PE `nvshmem_uint64_test` polling and provide payload consistency.
+Only init, arena allocation, and `close()` are collective. Arena views become
+invalid after `close()`.
 
 Run the smoke test with two visible GPUs:
 

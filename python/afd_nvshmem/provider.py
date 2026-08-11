@@ -133,18 +133,24 @@ class Provider:
         payload: torch.Tensor,
         signal: torch.Tensor,
         peer: int,
+        use_signal_set: bool = False,
     ) -> None:
         self._check_ready()
-        torch.ops.afd_nvshmem.put_signal_on_stream(payload, signal, peer)
+        torch.ops.afd_nvshmem.put_signal_on_stream(
+            payload, signal, peer, use_signal_set
+        )
 
     def wait_next_on_stream(
         self,
         signal: torch.Tensor,
         expected: torch.Tensor,
         arrivals: int = 1,
+        use_signal_set: bool = False,
     ) -> None:
         self._check_ready()
-        torch.ops.afd_nvshmem.wait_next_on_stream(signal, expected, arrivals)
+        torch.ops.afd_nvshmem.wait_next_on_stream(
+            signal, expected, arrivals, use_signal_set
+        )
 
     def close(self) -> None:
         if self._closed:
