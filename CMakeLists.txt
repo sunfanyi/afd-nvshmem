@@ -36,6 +36,7 @@ set(NVSHMEM_INCLUDE_DIR "${NVSHMEM_HOME}/include")
 set(NVSHMEM_DEVICE_LIBRARY "${NVSHMEM_HOME}/lib/libnvshmem_device.a")
 set(NVSHMEM_HOST_LIBRARY_SOURCE "${NVSHMEM_HOME}/lib/libnvshmem_host.so.3")
 set(NVSHMEM_BOOTSTRAP_UID_SOURCE "${NVSHMEM_HOME}/lib/nvshmem_bootstrap_uid.so.3")
+set(NVSHMEM_IBGDA_SOURCE "${NVSHMEM_HOME}/lib/nvshmem_transport_ibgda.so.3")
 if(NOT EXISTS "${NVSHMEM_BOOTSTRAP_UID_SOURCE}")
     set(NVSHMEM_BOOTSTRAP_UID_SOURCE "${NVSHMEM_HOME}/lib/nvshmem_bootstrap_uid.so")
 endif()
@@ -45,7 +46,8 @@ foreach(REQUIRED_PATH
         "${NVSHMEM_INCLUDE_DIR}/nvshmemx.h"
         "${NVSHMEM_DEVICE_LIBRARY}"
         "${NVSHMEM_HOST_LIBRARY_SOURCE}"
-        "${NVSHMEM_BOOTSTRAP_UID_SOURCE}")
+        "${NVSHMEM_BOOTSTRAP_UID_SOURCE}"
+        "${NVSHMEM_IBGDA_SOURCE}")
     if(NOT EXISTS "${REQUIRED_PATH}")
         message(FATAL_ERROR "Required NVSHMEM file not found: ${REQUIRED_PATH}")
     endif()
@@ -64,6 +66,9 @@ set(AFD_NVSHMEM_HOST_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/${AFD_NVSHMEM_HOST_SON
 set(AFD_NVSHMEM_BOOTSTRAP_UID_SONAME "afd_nvshmem_bootstrap_uid.so.3")
 set(AFD_NVSHMEM_BOOTSTRAP_UID_PLUGIN
     "${CMAKE_CURRENT_BINARY_DIR}/${AFD_NVSHMEM_BOOTSTRAP_UID_SONAME}")
+set(AFD_NVSHMEM_IBGDA_SONAME "afdpriv_transport_ibgda.so.3")
+set(AFD_NVSHMEM_IBGDA_PLUGIN
+    "${CMAKE_CURRENT_BINARY_DIR}/${AFD_NVSHMEM_IBGDA_SONAME}")
 
 function(afd_nvshmem_private_copy SOURCE DESTINATION SONAME)
     execute_process(
@@ -91,6 +96,38 @@ afd_nvshmem_private_copy(
     "${NVSHMEM_BOOTSTRAP_UID_SOURCE}"
     "${AFD_NVSHMEM_BOOTSTRAP_UID_PLUGIN}"
     "${AFD_NVSHMEM_BOOTSTRAP_UID_SONAME}")
+afd_nvshmem_private_copy(
+    "${NVSHMEM_IBGDA_SOURCE}"
+    "${AFD_NVSHMEM_IBGDA_PLUGIN}"
+    "${AFD_NVSHMEM_IBGDA_SONAME}")
+
+# NVSHMEM hardcodes transport plugin filenames in the host runtime. Keep the
+# replacement the same length so the private binary can select its private
+# IBGDA plugin without rebuilding NVSHMEM itself.
+set(AFD_NVSHMEM_PATCH_PLUGIN_NAME [=[
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+old = sys.argv[2].encode()
+new = sys.argv[3].encode()
+if len(old) != len(new):
+    raise RuntimeError("plugin loader names must have equal length")
+data = path.read_bytes()
+if data.count(old) != 1:
+    raise RuntimeError(f"expected exactly one {old!r} in {path}")
+path.write_bytes(data.replace(old, new))
+]=])
+execute_process(
+    COMMAND ${Python_EXECUTABLE} -c "${AFD_NVSHMEM_PATCH_PLUGIN_NAME}"
+            "${AFD_NVSHMEM_HOST_LIBRARY}"
+            "nvshmem_transport_ibgda.so.%d"
+            "afdpriv_transport_ibgda.so.%d"
+    COMMAND_ERROR_IS_FATAL ANY)
+execute_process(
+    COMMAND "${PATCHELF_EXECUTABLE}" --set-rpath "$ORIGIN"
+            "${AFD_NVSHMEM_HOST_LIBRARY}"
+    COMMAND_ERROR_IS_FATAL ANY)
 
 Python_add_library(
     _C
@@ -133,7 +170,10 @@ target_link_options(_C PRIVATE "LINKER:--exclude-libs,ALL")
 
 install(TARGETS _C LIBRARY DESTINATION afd_nvshmem)
 install(
-    FILES "${AFD_NVSHMEM_HOST_LIBRARY}" "${AFD_NVSHMEM_BOOTSTRAP_UID_PLUGIN}"
+    FILES
+        "${AFD_NVSHMEM_HOST_LIBRARY}"
+        "${AFD_NVSHMEM_BOOTSTRAP_UID_PLUGIN}"
+        "${AFD_NVSHMEM_IBGDA_PLUGIN}"
     DESTINATION afd_nvshmem)
 
 # The wheel redistributes NVSHMEM binaries; ship their license text with it.

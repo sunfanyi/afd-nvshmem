@@ -21,20 +21,20 @@ runtime versions.
 The wheel bundles renamed private copies of the NVSHMEM host runtime
 (`libafd_nvshmem_host.so.3`) and of the UID bootstrap plugin
 (`afd_nvshmem_bootstrap_uid.so.3`), taken from `NVSHMEM_HOME` at build time.
+It also bundles a renamed IBGDA transport plugin
+(`afdpriv_transport_ibgda.so.3`).
 The extension links and loads only these copies, so the provider runs its own
 NVSHMEM instance and can coexist in one process with other users of the stock
 `libnvshmem_host.so.3` (e.g. DeepEP low-latency), which would otherwise merge
 two incompatible worlds and deadlock
 (see [NVIDIA/nvshmem#68](https://github.com/NVIDIA/nvshmem/issues/68)).
 
-The isolation currently covers the built-in P2P transport only, which spans
-the NVLink domain: same-node peers and, on GB-series systems with IMEX
-channels configured, multi-node NVLink (MNNVL) peers in the same fabric.
-Remote transports (IBRC/IBGDA/...) are dlopen'd stock plugins with hardcoded
-names that would be shared with the other instance, so initialization forces
-`NVSHMEM_REMOTE_TRANSPORT=none` and `NVSHMEM_IB_ENABLE_IBGDA=0` for the
-private instance; peers outside the NVLink domain are unsupported until
-renamed copies of the transport plugins are shipped as well. Ambient
+The built-in P2P transport spans the NVLink domain: same-node peers and, on
+GB-series systems with IMEX channels configured, multi-node NVLink (MNNVL)
+peers in the same fabric. Pass `remote_transport="ibgda"` to `get_unique_id`
+and `Provider.init` to enable the private IBGDA plugin for peers outside that
+domain. The default is `none`, preserving the NVLink-only behavior. IBRC, UCX,
+and other remote transports are intentionally unsupported. Ambient
 `NVSHMEM_*` variables for other libraries are untouched, and initialization
 fails fast if a stock runtime preempted the private symbol binding (e.g. via
 `LD_PRELOAD`).
@@ -56,8 +56,17 @@ uv build --wheel --no-build-isolation
 ```python
 from afd_nvshmem import Provider, get_unique_id
 
-uid = get_unique_id()  # Generate on one rank and broadcast as opaque bytes.
-provider = Provider.init(uid, rank, world_size, device)
+remote_transport = "ibgda"  # Use "none" when every peer is NVLink-reachable.
+uid = get_unique_id(
+    remote_transport=remote_transport
+)  # Generate on one rank and broadcast as opaque bytes.
+provider = Provider.init(
+    uid,
+    rank,
+    world_size,
+    device,
+    remote_transport=remote_transport,
+)
 arena = provider.allocate_arena(num_bytes)
 
 provider.put_signal_on_stream(
@@ -84,3 +93,5 @@ Run the smoke test with two visible GPUs:
 ```bash
 torchrun --standalone --nproc-per-node=2 tests/provider_smoke.py
 ```
+
+Add `--remote-transport ibgda` when the two PEs are outside one NVLink domain.

@@ -12,6 +12,8 @@ from afd_nvshmem import _C  # noqa: F401
 _PRIVATE_BOOTSTRAP_UID_PLUGIN = (
     Path(__file__).resolve().parent / "afd_nvshmem_bootstrap_uid.so.3"
 )
+_PRIVATE_IBGDA_PLUGIN = Path(__file__).resolve().parent / "afdpriv_transport_ibgda.so.3"
+_REMOTE_TRANSPORTS = frozenset({"none", "ibgda"})
 
 
 class VersionInfo(NamedTuple):
@@ -19,8 +21,17 @@ class VersionInfo(NamedTuple):
     runtime: tuple[int, int, int]
 
 
+def _normalize_remote_transport(remote_transport: str) -> str:
+    value = remote_transport.lower()
+    if value not in _REMOTE_TRANSPORTS:
+        raise ValueError(
+            "remote_transport must be 'none' or 'ibgda', " f"got {remote_transport!r}"
+        )
+    return value
+
+
 @contextmanager
-def _isolated_runtime_env() -> Iterator[None]:
+def _isolated_runtime_env(remote_transport: str) -> Iterator[None]:
     """Scope env vars so the private NVSHMEM instance stays isolated.
 
     The extension links a renamed private copy of the NVSHMEM host runtime so
@@ -30,17 +41,19 @@ def _isolated_runtime_env() -> Iterator[None]:
     these env vars during unique-id generation and initialization only, so
     the scope covers both call sites.
 
-    Only the built-in P2P transport (NVLink domain, including multi-node
-    NVLink via IMEX on GB-series systems) is isolated today: remote
-    transports (IBRC/IBGDA/...) are dlopen'd stock plugins with hardcoded
-    names that would be shared with the other NVSHMEM instance, so they are
-    forced off until renamed private copies are shipped as well. Note that
-    IBGDA has its own enable switch independent of NVSHMEM_REMOTE_TRANSPORT.
+    The built-in P2P transport covers the NVLink domain, including multi-node
+    NVLink via IMEX on GB-series systems. IBGDA is provided as a renamed
+    private plugin for peers outside that domain. Other remote transports are
+    intentionally unsupported.
     """
+    remote_transport = _normalize_remote_transport(remote_transport)
+    if remote_transport == "ibgda" and not _PRIVATE_IBGDA_PLUGIN.is_file():
+        raise RuntimeError(f"private IBGDA plugin not found: {_PRIVATE_IBGDA_PLUGIN}")
+
     overrides = {
         "NVSHMEM_BOOTSTRAP_UID_PLUGIN": str(_PRIVATE_BOOTSTRAP_UID_PLUGIN),
-        "NVSHMEM_REMOTE_TRANSPORT": "none",
-        "NVSHMEM_IB_ENABLE_IBGDA": "0",
+        "NVSHMEM_REMOTE_TRANSPORT": remote_transport,
+        "NVSHMEM_IB_ENABLE_IBGDA": "1" if remote_transport == "ibgda" else "0",
     }
     saved = {key: os.environ.get(key) for key in overrides}
     os.environ.update(overrides)
@@ -54,8 +67,8 @@ def _isolated_runtime_env() -> Iterator[None]:
                 os.environ[key] = value
 
 
-def get_unique_id() -> bytes:
-    with _isolated_runtime_env():
+def get_unique_id(*, remote_transport: str = "none") -> bytes:
+    with _isolated_runtime_env(remote_transport):
         return bytes(torch.ops.afd_nvshmem.get_unique_id())
 
 
@@ -66,10 +79,12 @@ class Provider:
         rank: int,
         world_size: int,
         device: int,
+        *,
+        remote_transport: str = "none",
     ):
         if not isinstance(unique_id, bytes):
             raise TypeError("unique_id must be bytes")
-        with _isolated_runtime_env():
+        with _isolated_runtime_env(remote_transport):
             versions = torch.ops.afd_nvshmem.init_provider(
                 list(unique_id), rank, world_size, device
             )
@@ -90,8 +105,16 @@ class Provider:
         rank: int,
         world_size: int,
         device: int,
+        *,
+        remote_transport: str = "none",
     ) -> "Provider":
-        return cls(unique_id, rank, world_size, device)
+        return cls(
+            unique_id,
+            rank,
+            world_size,
+            device,
+            remote_transport=remote_transport,
+        )
 
     @property
     def rank(self) -> int:
