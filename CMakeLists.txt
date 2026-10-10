@@ -177,25 +177,27 @@ install(
     DESTINATION afd_nvshmem)
 
 # The wheel redistributes NVSHMEM binaries; ship their license text with it.
-set(NVSHMEM_LICENSE_FILE "")
-foreach(LICENSE_CANDIDATE
-        "${NVSHMEM_HOME}/License.txt"
-        "${NVSHMEM_HOME}/LICENSE.txt"
-        "${NVSHMEM_HOME}/LICENSE"
-        "${NVSHMEM_HOME}/share/doc/nvshmem/License.txt"
-        "${NVSHMEM_HOME}/share/doc/nvshmem/copyright")
-    if(EXISTS "${LICENSE_CANDIDATE}")
-        set(NVSHMEM_LICENSE_FILE "${LICENSE_CANDIDATE}")
-        break()
-    endif()
-endforeach()
-if(NVSHMEM_LICENSE_FILE)
-    install(
-        FILES "${NVSHMEM_LICENSE_FILE}"
-        DESTINATION afd_nvshmem
-        RENAME "NVSHMEM_LICENSE.txt")
-else()
-    message(WARNING
-        "No NVSHMEM license file found under ${NVSHMEM_HOME}; the wheel "
-        "redistributes NVSHMEM binaries without their license text")
+set(NVSHMEM_LICENSE_FILE "" CACHE FILEPATH
+    "License file from the NVSHMEM distribution being bundled")
+if(NOT NVSHMEM_LICENSE_FILE)
+    foreach(LICENSE_CANDIDATE
+            "${NVSHMEM_HOME}/License.txt"
+            "${NVSHMEM_HOME}/LICENSE.txt"
+            "${NVSHMEM_HOME}/LICENSE"
+            "${NVSHMEM_HOME}/share/doc/nvshmem/License.txt"
+            "${NVSHMEM_HOME}/share/doc/nvshmem/copyright")
+        if(EXISTS "${LICENSE_CANDIDATE}")
+            set(NVSHMEM_LICENSE_FILE "${LICENSE_CANDIDATE}")
+            break()
+        endif()
+    endforeach()
 endif()
+if(NOT EXISTS "${NVSHMEM_LICENSE_FILE}" OR IS_DIRECTORY "${NVSHMEM_LICENSE_FILE}")
+    message(FATAL_ERROR
+        "NVSHMEM license file not found. Set NVSHMEM_LICENSE_FILE to the "
+        "license supplied with the NVSHMEM distribution at ${NVSHMEM_HOME}.")
+endif()
+install(
+    FILES "${NVSHMEM_LICENSE_FILE}"
+    DESTINATION afd_nvshmem
+    RENAME "NVSHMEM_LICENSE.txt")

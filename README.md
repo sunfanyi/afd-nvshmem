@@ -1,97 +1,163 @@
 # afd-nvshmem
 
-`afd-nvshmem` is a small native NVSHMEM provider for the SGLang
-Attention-FFN Disaggregation data plane.
+`afd-nvshmem` provides the NVSHMEM transport used by SGLang Attention-FFN
+Disaggregation (AFD). It exposes a symmetric memory arena as PyTorch tensors,
+stream-ordered transfers with remote signaling, and CUDA Graph-compatible
+signal waits. SGLang manages the AFD protocol and buffer layout; this package
+provides the communication primitives.
 
-It owns the complete process lifecycle:
+## Requirements
 
-- unique-ID bootstrap and initialization;
-- one aligned symmetric byte arena exposed as non-owning PyTorch views;
-- stream-ordered put-with-signal;
-- GPU-resident dynamic signal wait;
-- collective free and finalize.
+- Linux with a CUDA toolkit and a C++20 compiler compatible with the installed
+  PyTorch and NVSHMEM versions.
+- Python 3.10 or newer and CUDA-enabled PyTorch 2.11 or newer.
+- NVSHMEM 3.4.5 or newer, including the headers, static device library, host
+  library, UID bootstrap plugin, and IBGDA transport plugin.
+- CMake 3.26 or newer, `uv`, and `patchelf`.
 
-The provider requires NVSHMEM 3.4.5 or newer. It is built against the target
-NVSHMEM headers and libraries; binary wheels are not portable across CPU
-architectures, Python ABIs, CUDA GPU architectures, or arbitrary NVSHMEM
-runtime versions.
+Use one process per GPU. By default, all participating GPUs must be reachable
+through NVLink. Multi-node NVLink requires IMEX configuration on supported
+systems. For peers outside that domain, select `remote_transport="ibgda"`
+and configure the system for NVSHMEM IBGDA. Other remote transports are not
+supported.
 
-## Private NVSHMEM runtime
+## Build and install
 
-The wheel bundles renamed private copies of the NVSHMEM host runtime
-(`libafd_nvshmem_host.so.3`) and of the UID bootstrap plugin
-(`afd_nvshmem_bootstrap_uid.so.3`), taken from `NVSHMEM_HOME` at build time.
-It also bundles a renamed IBGDA transport plugin
-(`afdpriv_transport_ibgda.so.3`).
-The extension links and loads only these copies, so the provider runs its own
-NVSHMEM instance and can coexist in one process with other users of the stock
-`libnvshmem_host.so.3` (e.g. DeepEP low-latency), which would otherwise merge
-two incompatible worlds and deadlock
-(see [NVIDIA/nvshmem#68](https://github.com/NVIDIA/nvshmem/issues/68)).
-
-The built-in P2P transport spans the NVLink domain: same-node peers and, on
-GB-series systems with IMEX channels configured, multi-node NVLink (MNNVL)
-peers in the same fabric. Pass `remote_transport="ibgda"` to `get_unique_id`
-and `Provider.init` to enable the private IBGDA plugin for peers outside that
-domain. The default is `none`, preserving the NVLink-only behavior. IBRC, UCX,
-and other remote transports are intentionally unsupported. Ambient
-`NVSHMEM_*` variables for other libraries are untouched, and initialization
-fails fast if a stock runtime preempted the private symbol binding (e.g. via
-`LD_PRELOAD`).
-
-## Build
-
-Install PyTorch, `patchelf`, and the build requirements, then build on the
-target machine (`--no-build-isolation` skips the declared build requirements,
-so `patchelf` must already be on `PATH`):
+Install CUDA-enabled PyTorch in the build environment first. From the
+repository root, install the remaining build requirements and build a wheel:
 
 ```bash
+python -m pip install 'scikit-build-core>=0.10' wheel patchelf
 export NVSHMEM_HOME=/path/to/nvshmem
-export TORCH_CUDA_ARCH_LIST=10.3  # Use 9.0 for Hopper.
 uv build --wheel --no-build-isolation
+python -m pip install dist/afd_nvshmem-*.whl
 ```
 
-## Usage
+`NVSHMEM_HOME` must contain `include/` and `lib/`. The build links against
+that installation and bundles private copies of its host runtime and plugins.
+Build and install with the same PyTorch environment. Wheels depend on the CPU
+architecture, Python ABI, CUDA architectures, and the bundled NVSHMEM version.
 
-```python
-from afd_nvshmem import Provider, get_unique_id
+The build uses the NVSHMEM installation selected by `NVSHMEM_HOME`; it does
+not pin a release. Newer versions can be used while the required APIs and
+library layout remain compatible.
 
-remote_transport = "ibgda"  # Use "none" when every peer is NVLink-reachable.
-uid = get_unique_id(
-    remote_transport=remote_transport
-)  # Generate on one rank and broadcast as opaque bytes.
-provider = Provider.init(
-    uid,
-    rank,
-    world_size,
-    device,
-    remote_transport=remote_transport,
-)
-arena = provider.allocate_arena(num_bytes)
+Set `TORCH_CUDA_ARCH_LIST` to select target GPU architectures, for example:
 
-provider.put_signal_on_stream(
-    payload, signal, peer, use_signal_set=remote_signal_writers == 1
-)
-provider.wait_next_on_stream(
-    signal, expected, arrivals, use_signal_set=arrivals == 1
-)
-provider.close()
+```bash
+TORCH_CUDA_ARCH_LIST="9.0 10.0 10.3" uv build --wheel --no-build-isolation
 ```
 
-The default ADD mode waits for `expected += arrivals`; `arrivals=0` is a
-no-op. SET mode is valid only when the target signal has one writer, the
-receiver uses `arrivals=1`, and the slot cannot be reused before wait resets
-the signal. Both sides must select the same mode. Both modes are stream
-ordered and CUDA Graph reusable.
+PyTorch configures the extension's CUDA targets. The selected CUDA toolkit
+must support every requested architecture.
 
-Waits use per-PE `nvshmem_uint64_test` polling and provide payload consistency.
-Only init, arena allocation, and `close()` are collective. Arena views become
-invalid after `close()`.
+### NVSHMEM license file
 
-Run the smoke test with two visible GPUs:
+The build requires the license from the NVSHMEM distribution being bundled.
+It searches `NVSHMEM_HOME`; if the license is elsewhere, pass its path:
+
+```bash
+uv build --wheel --no-build-isolation \
+  -C cmake.define.NVSHMEM_LICENSE_FILE=/path/to/nvshmem/License.txt
+```
+
+NVIDIA's Python packages may store the file under `.dist-info/licenses/`
+rather than `NVSHMEM_HOME`. For an installation from `nvidia-nvshmem-cu13`,
+locate it with:
+
+```bash
+python - <<'PY'
+from importlib.metadata import distribution
+
+dist = distribution("nvidia-nvshmem-cu13")
+for path in dist.files:
+    if path.name == "License.txt":
+        print(dist.locate_file(path))
+PY
+```
+
+Use the license from the same distribution as `NVSHMEM_HOME`.
+
+## Verify the installation
+
+Run the [provider smoke test](tests/provider_smoke.py) with two visible GPUs
+in one NVLink domain:
 
 ```bash
 torchrun --standalone --nproc-per-node=2 tests/provider_smoke.py
 ```
 
-Add `--remote-transport ibgda` when the two PEs are outside one NVLink domain.
+The test checks payload transfers on a non-default CUDA stream, signal
+counters, CUDA Graph replay, and collective shutdown. A successful run prints
+`"status": "PASS"` and zero payload mismatches. The test is also a complete
+example of UID exchange, arena layout, and request/response transfers.
+
+For an IBGDA deployment, launch the same test with exactly two processes
+across the participating hosts and add `--remote-transport ibgda`.
+
+## Python API
+
+Import `Provider` and `get_unique_id` from `afd_nvshmem`.
+
+| API | Behavior |
+| --- | --- |
+| `get_unique_id(*, remote_transport="none")` | Returns opaque UID bytes. Generate the UID on one rank before initialization and distribute it to all participating ranks through an external control channel. |
+| `Provider.init(unique_id, rank, world_size, device, *, remote_transport="none")` | Initializes the NVSHMEM group. All ranks must use the same UID, world size, and transport. `device` is the process-local CUDA device index. |
+| `provider.allocate_arena(num_bytes)` | Collectively allocates one zero-initialized, 256-byte-aligned `torch.uint8` arena. All ranks must allocate the same size and use the same layout. |
+| `provider.put_signal_on_stream(payload, signal, peer, use_signal_set=False)` | Copies `payload` to the same arena offset on `peer`, then updates the remote signal at the corresponding offset. |
+| `provider.wait_next_on_stream(signal, expected, arrivals=1, use_signal_set=False)` | Enqueues a GPU wait for the next expected arrivals. The default mode increments `expected` by `arrivals` and waits until `signal >= expected`. |
+| `provider.close()` | Synchronizes the device, performs a group barrier, frees the arena, and finalizes the private NVSHMEM instance. |
+
+`world_size` must be greater than one. Only one provider can be initialized
+per process, and it cannot be reinitialized after `close()`. Initialization,
+arena allocation, and shutdown require all ranks to participate.
+
+### Buffers and streams
+
+All communication tensors must be contiguous, one-dimensional views into
+the provider's arena. Payloads must be nonempty and use `torch.uint8`;
+`signal` and `expected` each contain one 8-byte-aligned `torch.uint64`.
+The payload and signal must not overlap, and `signal` and `expected` must
+occupy separate locations.
+The peer must differ from the local rank.
+
+Transfers and waits use PyTorch's current CUDA stream on the provider's
+device. Work consuming a received payload must follow its wait on that
+stream, or use an explicit stream dependency. Both operations can be captured
+in a CUDA Graph: the expected sequence is updated on the GPU during replay.
+In the default ADD mode, `arrivals=0` leaves the counters unchanged and does
+not wait.
+
+SET mode (`use_signal_set=True`) sets the remote signal to one; the receiver
+waits for one and resets it to zero. Use it only with one writer per signal,
+`arrivals=1`, and a protocol that prevents the sender from reusing the slot
+before the receiver resets it. Sender and receiver must select the same mode.
+
+Call `close()` on every rank after communication has finished. Retained arena
+views become invalid when it returns and must not be used afterward.
+
+## Runtime isolation
+
+An AFD process may also use DeepEP with a different NVSHMEM group. To keep
+the groups separate, the wheel contains renamed copies of the host runtime
+and its plugins:
+
+- `libafd_nvshmem_host.so.3`
+- `afd_nvshmem_bootstrap_uid.so.3`
+- `afdpriv_transport_ibgda.so.3`
+
+The extension links to the private host library. UID generation and
+initialization temporarily select the private plugins and requested transport,
+then restore the previous environment variables. Initialization fails if a
+stock NVSHMEM runtime has preempted the private symbols, for example through
+`LD_PRELOAD` or `RTLD_GLOBAL`. See
+[NVIDIA/nvshmem#68](https://github.com/NVIDIA/nvshmem/issues/68) for discussion
+of independent modules sharing NVSHMEM process state.
+
+## License
+
+This project's source is licensed under [Apache-2.0](LICENSE). Bundled
+NVSHMEM binaries retain the terms of their distribution; the wheel includes
+that distribution's license as `afd_nvshmem/NVSHMEM_LICENSE.txt`. Including
+this file does not establish permission to redistribute modified NVSHMEM
+binaries.

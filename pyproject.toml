@@ -24,7 +24,7 @@ dependencies = []
 cmake.build-type = "Release"
 minimum-version = "build-system.requires"
 wheel.packages = ["python/afd_nvshmem"]
-wheel.license-files = []
+wheel.license-files = ["LICENSE"]
 
 [tool.wheel]
 exclude = [
